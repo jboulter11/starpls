@@ -1,5 +1,8 @@
 use crate::{
-    def::{ExprId, Function, LiteralString, LoadItemId, LoadStmt, Param as HirDefParam, ParamId},
+    def::{
+        codeflow::FlowNodeId, ExprId, Function, LiteralString, LoadItemId, LoadStmt,
+        Param as HirDefParam, ParamId,
+    },
     module, source_map,
     typeck::{
         builtins::{
@@ -16,7 +19,7 @@ use crate::{
 use crossbeam::atomic::AtomicCell;
 use either::Either;
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
 use starpls_common::{parse, Diagnostic, Dialect, File, InFile};
 use starpls_intern::{impl_internable, Interned};
@@ -1311,6 +1314,19 @@ impl GlobalCtxt {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CodeFlowCacheKey {
+    name: Name,
+    flow_node: FlowNodeId,
+}
+
+impl CodeFlowCacheKey {
+    pub(crate) fn new(name: Name, flow_node: FlowNodeId) -> Self {
+        Self { name, flow_node }
+    }
+}
+
+#[allow(unused)]
 #[derive(Default)]
 pub(crate) struct InferenceCtxt {
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -1319,6 +1335,8 @@ pub(crate) struct InferenceCtxt {
     pub(crate) type_of_expr: FxHashMap<FileExprId, Ty>,
     pub(crate) type_of_load_item: FxHashMap<FileLoadItemId, Ty>,
     pub(crate) type_of_param: FxHashMap<FileParamId, Ty>,
+    pub(crate) source_assign_done: FxHashSet<FileExprId>,
+    pub(crate) flow_node_type_cache: FxHashMap<CodeFlowCacheKey, Option<Ty>>,
 }
 
 pub struct CancelGuard<'a> {

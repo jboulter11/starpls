@@ -45,6 +45,11 @@ enum Commands {
 pub(crate) struct ServerArgs {
     #[clap(long = "bazel_path")]
     bazel_path: Option<String>,
+    #[clap(
+        long = "experimental_enable_dataflow_analysis",
+        default_value_t = false
+    )]
+    experimental_enable_dataflow_analysis: bool,
 }
 
 fn main() -> anyhow::Result<()> {

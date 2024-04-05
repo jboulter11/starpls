@@ -213,7 +213,7 @@ greeting = 1 # type: string
             1..9 "greeting": string
             12..13 "1": Literal[1]
 
-            12..13 Expected value of type "string"
+            12..13 Expression of type "Literal[1]" cannot be assigned to variable of type "string"
         "#]],
     )
 }

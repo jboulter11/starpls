@@ -133,7 +133,7 @@ impl<'a> Semantics<'a> {
         let load_stmt = load_item.load_stmt(self.db)?;
         let loaded_file = self.resolve_load_stmt(load_item.file, &load_stmt)?;
         self.scope_for_module(loaded_file)
-            .resolve_name(&load_item.name(self.db))?
+            .resolve_name(&load_item.name(self.db))
             .into_iter()
             .next()
             .map(|def| InFile {
@@ -266,10 +266,18 @@ impl SemanticsScope<'_> {
             .map(|(name, def)| (name, def.into()))
     }
 
-    pub fn resolve_name(&self, name: &Name) -> Option<Vec<ScopeDef>> {
-        self.resolver
-            .resolve_name(&name)
-            .map(|defs| defs.into_iter().map(|def| def.into()).collect())
+    pub fn resolve_name(&self, name: &Name) -> Vec<ScopeDef> {
+        let defs = match self.resolver.resolve_name(name) {
+            Some((_, defs)) => defs,
+            None => return Vec::new(),
+        };
+        let mut defs = defs.map(|def| def.def.clone().into()).collect::<Vec<_>>();
+        if defs.is_empty() {
+            if let Some(builtin_defs) = self.resolver.resolve_name_in_builtins(name) {
+                defs.extend(builtin_defs.into_iter().map(|def| def.into()));
+            }
+        }
+        defs
     }
 }
 

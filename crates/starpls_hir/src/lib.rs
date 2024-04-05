@@ -35,6 +35,8 @@ pub struct Jar(
     def::Function,
     def::LoadStmt,
     def::LiteralString,
+    def::codeflow::CodeFlowGraphResult,
+    def::codeflow::code_flow_graph,
     def::scope::ModuleScopes,
     def::scope::module_scopes,
     def::scope::module_scopes_query,

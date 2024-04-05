@@ -1,6 +1,5 @@
-use std::{collections::HashSet, ops::Index};
-
 use crate::{typeck::TypeRef, Db, Ty, TyKind};
+use either::Either;
 use id_arena::{Arena, Id};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
@@ -9,7 +8,9 @@ use starpls_syntax::{
     ast::{self, AssignOp, AstPtr, BinaryOp, SyntaxNodePtr, UnaryOp},
     TextRange,
 };
+use std::{collections::HashSet, ops::Index};
 
+pub(crate) mod codeflow;
 mod lower;
 pub(crate) mod resolver;
 pub(crate) mod scope;
@@ -262,8 +263,7 @@ pub(crate) enum Stmt {
     If {
         test: ExprId,
         if_stmts: Box<[StmtId]>,
-        elif_stmt: Option<StmtId>,
-        else_stmts: Box<[StmtId]>,
+        elif_or_else_stmts: Option<Either<StmtId, Box<[StmtId]>>>,
     },
     For {
         iterable: ExprId,

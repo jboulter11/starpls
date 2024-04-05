@@ -1,7 +1,8 @@
 use crate::{
     def::{
+        codeflow::{code_flow_graph, CodeFlowGraph, FlowNode, FlowNodeId},
         resolver::{Export, Resolver},
-        scope::{LoadItemDef, ParameterDef, ScopeDef, VariableDef},
+        scope::{ExecutionScopeId, LoadItemDef, ParameterDef, ScopeDef, ScopeHirId, VariableDef},
         Argument, Expr, ExprId, Literal, LiteralString, LoadItem, LoadItemId, LoadStmt, Param,
         ParamId, Stmt,
     },
@@ -11,9 +12,9 @@ use crate::{
         assign_tys,
         call::{Slot, SlotProvider, Slots},
         intrinsics::{IntrinsicFunctionParam, IntrinsicTypes},
-        resolve_type_ref, resolve_type_ref_opt, DictLiteral, FileExprId, FileLoadItemId,
-        FileLoadStmt, FileParamId, Protocol, Substitution, Tuple, Ty, TyCtxt, TyKind, TypeRef,
-        TypecheckCancelled,
+        resolve_type_ref, resolve_type_ref_opt, CodeFlowCacheKey, DictLiteral, FileExprId,
+        FileLoadItemId, FileLoadStmt, FileParamId, Protocol, Substitution, Tuple, Ty, TyCtxt,
+        TyKind, TypeRef, TypecheckCancelled,
     },
     Name,
 };
@@ -90,50 +91,14 @@ impl TyCtxt<'_> {
         let db = self.db;
         let curr_module = module(db, file);
         let ty = match &curr_module[expr] {
-            Expr::Name { name } => {
-                let resolver = Resolver::new_for_expr(db, file, expr);
-                resolver
-                    .resolve_name(name)
-                    .and_then(|decls| decls.into_iter().last())
-                    .map(|decl| match decl {
-                        ScopeDef::Variable(VariableDef { expr, source, .. }) => self
-                            .cx
-                            .type_of_expr
-                            .get(&FileExprId::new(file, expr))
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                source
-                                    .and_then(|source| {
-                                        self.infer_source_expr_assign(file, source);
-                                        self.cx
-                                            .type_of_expr
-                                            .get(&FileExprId::new(file, expr))
-                                            .cloned()
-                                    })
-                                    .unwrap_or_else(|| self.unknown_ty())
-                            }),
-                        ScopeDef::Function(func) => func.ty(),
-                        ScopeDef::IntrinsicFunction(func) => {
-                            TyKind::IntrinsicFunction(func, Substitution::new_identity(0)).intern()
-                        }
-                        ScopeDef::BuiltinFunction(func) => TyKind::BuiltinFunction(func).intern(),
-                        ScopeDef::BuiltinVariable(type_ref) => resolve_type_ref(db, &type_ref).0,
-                        ScopeDef::Parameter(ParameterDef { func, index }) => func
-                            .map(|func| self.infer_param(file, func.params(db)[index]))
-                            .unwrap_or_else(|| self.unknown_ty()),
-                        ScopeDef::LoadItem(LoadItemDef { load_item, .. }) => {
-                            self.infer_load_item(file, load_item)
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        self.add_expr_diagnostic_error(
-                            file,
-                            expr,
-                            format!("\"{}\" is not defined", name.as_str()),
-                        );
-                        self.unbound_ty()
-                    })
-            }
+            Expr::Name { name } => self.infer_name_expr(file, expr, name).unwrap_or_else(|| {
+                self.add_expr_diagnostic_error(
+                    file,
+                    expr,
+                    format!("\"{}\" is not defined", name.as_str()),
+                );
+                self.unbound_ty()
+            }),
             Expr::List { exprs } => {
                 // Determine the full type of the list. If all of the specified elements are of the same type T, then
                 // we assign the list the type `list[T]`. Otherwise, we assign it the type `list[Unknown]`.
@@ -894,7 +859,21 @@ impl TyCtxt<'_> {
         }
     }
 
-    fn infer_source_expr_assign(&mut self, file: File, source: ExprId) {
+    fn infer_source_expr_assign(&mut self, file: File, source: ExprId, expected_ty: Option<Ty>) {
+        let key = FileExprId::new(file, source);
+        if self.cx.source_assign_done.contains(&key) {
+            return;
+        }
+        self.infer_source_expr_assign_inner(file, source, expected_ty);
+        self.cx.source_assign_done.insert(key);
+    }
+
+    fn infer_source_expr_assign_inner(
+        &mut self,
+        file: File,
+        source: ExprId,
+        expected_ty: Option<Ty>,
+    ) {
         // Find the parent assignment node. This can be either an assignment statement (`x = 0`), a `for` statement (`for x in 1, 2, 3`), or
         // a for comp clause in a list/dict comprehension (`[x + 1 for x in [1, 2, 3]]`).
         let db = self.db;
@@ -918,21 +897,28 @@ impl TyCtxt<'_> {
         // Handle standard assigments, e.g. `x, y = 1, 2`.
         if let Some(node) = ast::AssignStmt::cast(parent.clone()) {
             let ptr = AstPtr::new(&ast::Statement::Assign(node.clone()));
-            let expected_ty = match &module(db, file)[*source_map.stmt_map.get(&ptr).unwrap()] {
-                Stmt::Assign { type_ref, .. } => type_ref.as_ref().and_then(|type_ref| {
-                    let (expected_ty, errors) = resolve_type_ref(db, &type_ref.0);
-                    if errors.is_empty() {
-                        Some(expected_ty)
-                    } else {
-                        // Add TypeRef resolution errors.
-                        for error in errors.iter() {
-                            self.add_diagnostic_for_range(file, Severity::Error, type_ref.1, error);
+            let expected_ty = expected_ty.or_else(|| {
+                match &module(db, file)[*source_map.stmt_map.get(&ptr).unwrap()] {
+                    Stmt::Assign { type_ref, .. } => type_ref.as_ref().and_then(|type_ref| {
+                        let (expected_ty, errors) = resolve_type_ref(db, &type_ref.0);
+                        if errors.is_empty() {
+                            Some(expected_ty)
+                        } else {
+                            // Add TypeRef resolution errors.
+                            for error in errors.iter() {
+                                self.add_diagnostic_for_range(
+                                    file,
+                                    Severity::Error,
+                                    type_ref.1,
+                                    error,
+                                );
+                            }
+                            None
                         }
-                        None
-                    }
-                }),
-                _ => None,
-            };
+                    }),
+                    _ => None,
+                }
+            });
 
             if let Some(lhs) = node.lhs() {
                 let lhs_ptr = AstPtr::new(&lhs);
@@ -986,6 +972,176 @@ impl TyCtxt<'_> {
         }
     }
 
+    fn infer_name_expr(&mut self, file: File, expr: ExprId, name: &Name) -> Option<Ty> {
+        let resolver = Resolver::new_for_expr_execution_scope(self.db, file, expr);
+        let expr_scope = resolver.scope_for_expr(expr)?;
+        let expr_execution_scope = resolver.execution_scope_for_expr(expr)?;
+
+        let (execution_scope, effective_ty) = match resolver.resolve_name(name) {
+            Some((execution_scope, defs)) => {
+                let mut var_defs = Vec::new();
+                let mut known_ty = None;
+                for def in defs.skip_while(|def| def.scope > expr_scope) {
+                    let ty = match def.def {
+                        ScopeDef::Variable(VariableDef { expr, source, .. }) => {
+                            var_defs.push((*expr, source.clone()));
+                            continue;
+                        }
+                        ScopeDef::Function(func) => func.ty().into(),
+                        ScopeDef::Parameter(ParameterDef { func, index }) => func
+                            .map(|func| self.infer_param(file, func.params(self.db)[*index]))
+                            .unwrap_or_else(|| self.unknown_ty()),
+                        ScopeDef::LoadItem(LoadItemDef { load_item, .. }) => {
+                            self.infer_load_item(file, *load_item)
+                        }
+                        // This should be unreachable.
+                        _ => continue,
+                    };
+
+                    known_ty = Some(ty)
+                }
+
+                let effective_ty = Ty::union(var_defs.into_iter().map(|(expr, source)| {
+                    let cached_ty = self
+                        .cx
+                        .type_of_expr
+                        .get(&FileExprId::new(file, expr))
+                        .cloned();
+                    cached_ty.unwrap_or_else(|| {
+                        source
+                            .and_then(|source| {
+                                self.infer_source_expr_assign(file, source, known_ty.clone());
+                                self.cx
+                                    .type_of_expr
+                                    .get(&FileExprId::new(file, expr))
+                                    .cloned()
+                            })
+                            .unwrap_or_else(|| self.unknown_ty())
+                    })
+                }));
+
+                if known_ty.is_some() {
+                    return known_ty;
+                }
+
+                (execution_scope, effective_ty)
+            }
+
+            None => {
+                let ty = match resolver.resolve_name_in_builtins(name)?.iter().next()? {
+                    ScopeDef::IntrinsicFunction(func) => {
+                        TyKind::IntrinsicFunction(*func, Substitution::new_identity(0)).intern()
+                    }
+                    ScopeDef::BuiltinFunction(func) => TyKind::BuiltinFunction(*func).intern(),
+                    ScopeDef::BuiltinVariable(type_ref) => resolve_type_ref(self.db, &type_ref).0,
+                    // This should be unreachable.
+                    _ => return None,
+                };
+                return Some(ty);
+            }
+        };
+
+        let res = self.infer_expr_from_code_flow(file, expr, name, &self.unbound_ty());
+        res.or_else(|| {
+            if execution_scope != expr_execution_scope {
+                let cfg = code_flow_graph(self.db, file).cfg(self.db);
+                let hir_id = match execution_scope {
+                    ExecutionScopeId::Module => ScopeHirId::Module.into(),
+                    ExecutionScopeId::Def(stmt) => stmt.into(),
+                    ExecutionScopeId::Comp(expr) => expr.into(),
+                };
+
+                let start_node = cfg.hir_to_flow_node.get(&hir_id)?;
+                self.infer_ref_from_flow_node(cfg, file, name, &self.unbound_ty(), *start_node)
+            } else {
+                Some(effective_ty)
+            }
+        })
+    }
+
+    fn infer_expr_from_code_flow(
+        &mut self,
+        file: File,
+        expr: ExprId,
+        name: &Name,
+        start_ty: &Ty,
+    ) -> Option<Ty> {
+        let cfg = code_flow_graph(self.db, file).cfg(self.db);
+        let start_node = cfg.expr_to_node.get(&expr)?;
+        self.infer_ref_from_flow_node(&cfg, file, name, start_ty, *start_node)
+    }
+
+    fn infer_ref_from_flow_node(
+        &mut self,
+        cfg: &CodeFlowGraph,
+        file: File,
+        name: &Name,
+        start_ty: &Ty,
+        start_node: FlowNodeId,
+    ) -> Option<Ty> {
+        if let Some(res) = self.read_cached_ref_type_at_flow_node(name, start_node) {
+            return res;
+        }
+
+        let mut curr_node_id = start_node;
+        let res = loop {
+            let curr_node = &cfg.flow_nodes[curr_node_id];
+            match &curr_node {
+                FlowNode::Start => break Some(start_ty.clone()),
+                FlowNode::Assign {
+                    expr,
+                    name: node_name,
+                    source,
+                    antecedent,
+                    ..
+                } => {
+                    if name != node_name {
+                        curr_node_id = *antecedent;
+                        continue;
+                    }
+
+                    self.infer_source_expr_assign(file, *source, None);
+                    let res = self
+                        .cx
+                        .type_of_expr
+                        .get(&FileExprId::new(file, *expr))
+                        .cloned();
+                    break res;
+                }
+                FlowNode::Branch { antecedents } => {
+                    break Some(Ty::union(antecedents.iter().filter_map(|antecedent| {
+                        self.infer_ref_from_flow_node(cfg, file, name, start_ty, *antecedent)
+                    })))
+                }
+            }
+        };
+
+        self.cache_ref_type_at_flow_node(name, start_node, res)
+    }
+
+    fn read_cached_ref_type_at_flow_node(
+        &self,
+        name: &Name,
+        flow_node: FlowNodeId,
+    ) -> Option<Option<Ty>> {
+        self.cx
+            .flow_node_type_cache
+            .get(&CodeFlowCacheKey::new(name.clone(), flow_node))
+            .cloned()
+    }
+
+    fn cache_ref_type_at_flow_node(
+        &mut self,
+        name: &Name,
+        flow_node: FlowNodeId,
+        res: Option<Ty>,
+    ) -> Option<Ty> {
+        self.cx
+            .flow_node_type_cache
+            .insert(CodeFlowCacheKey::new(name.clone(), flow_node), res.clone());
+        res
+    }
+
     fn assign_expr_source_ty(
         &mut self,
         file: File,
@@ -1004,7 +1160,8 @@ impl TyCtxt<'_> {
                             file,
                             root,
                             format!(
-                                "Expected value of type \"{}\"",
+                                "Expression of type \"{}\" cannot be assigned to variable of type \"{}\"",
+                                source_ty.display(self.db),
                                 expected_ty.display(self.db)
                             ),
                         )
