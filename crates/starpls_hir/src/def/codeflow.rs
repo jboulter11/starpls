@@ -78,17 +78,10 @@ impl<'a> CodeFlowLowerCtx<'a> {
                 self.lower_assignment_target(*lhs, *rhs);
             }
             Stmt::Def { stmts, .. } => {
-                let saved_curr_node = self.curr_node;
-                self.curr_node = self.new_flow_node(FlowNode::Start);
-                self.lower_stmts(stmts);
-                self.result
-                    .hir_to_flow_node
-                    .insert(stmt.into(), self.curr_node);
-                self.curr_node = saved_curr_node;
-                // self.with_new_start_node(|this| {
-                //     this.lower_stmts(stmts);
-                //     stmt
-                // });
+                self.with_new_start_node(|this| {
+                    this.lower_stmts(stmts);
+                    stmt
+                });
             }
             Stmt::If {
                 test,
@@ -135,7 +128,7 @@ impl<'a> CodeFlowLowerCtx<'a> {
 
     fn lower_expr(&mut self, expr: ExprId) {
         match &self.module[expr] {
-            Expr::Name { name } => {
+            Expr::Name { .. } => {
                 self.result.expr_to_node.insert(expr, self.curr_node);
             }
             Expr::DictComp {
@@ -300,12 +293,12 @@ y = "a"
                     }
 
                     'bb1: {
-                        data: Assign { expr: Id { idx: 0 }, name: Name("x"), execution_scope_id: Module, source: Id { idx: 1 }, antecedent: Id { idx: 0 } }
+                        data: Assign { expr: Id { idx: 0 }, name: Name("x"), execution_scope: Module, source: Id { idx: 1 }, antecedent: Id { idx: 0 } }
                         antecedents: ['bb0]
                     }
 
                     'bb2: {
-                        data: Assign { expr: Id { idx: 2 }, name: Name("y"), execution_scope_id: Module, source: Id { idx: 3 }, antecedent: Id { idx: 1 } }
+                        data: Assign { expr: Id { idx: 2 }, name: Name("y"), execution_scope: Module, source: Id { idx: 3 }, antecedent: Id { idx: 1 } }
                         antecedents: ['bb1]
                     }
 
@@ -333,7 +326,7 @@ if x > 0:
                     }
 
                     'bb2: {
-                        data: Assign { expr: Id { idx: 3 }, name: Name("y"), execution_scope_id: Module, source: Id { idx: 4 }, antecedent: Id { idx: 0 } }
+                        data: Assign { expr: Id { idx: 3 }, name: Name("y"), execution_scope: Module, source: Id { idx: 4 }, antecedent: Id { idx: 0 } }
                         antecedents: ['bb0]
                     }
 
@@ -365,22 +358,22 @@ y = 4
                     }
 
                     'bb2: {
-                        data: Assign { expr: Id { idx: 0 }, name: Name("x"), execution_scope_id: Def(Id { idx: 2 }), source: Id { idx: 1 }, antecedent: Id { idx: 1 } }
+                        data: Assign { expr: Id { idx: 0 }, name: Name("x"), execution_scope: Def(Id { idx: 2 }), source: Id { idx: 1 }, antecedent: Id { idx: 1 } }
                         antecedents: ['bb1]
                     }
 
                     'bb3: {
-                        data: Assign { expr: Id { idx: 2 }, name: Name("y"), execution_scope_id: Def(Id { idx: 2 }), source: Id { idx: 3 }, antecedent: Id { idx: 2 } }
+                        data: Assign { expr: Id { idx: 2 }, name: Name("y"), execution_scope: Def(Id { idx: 2 }), source: Id { idx: 3 }, antecedent: Id { idx: 2 } }
                         antecedents: ['bb2]
                     }
 
                     'bb4: {
-                        data: Assign { expr: Id { idx: 4 }, name: Name("x"), execution_scope_id: Module, source: Id { idx: 5 }, antecedent: Id { idx: 0 } }
+                        data: Assign { expr: Id { idx: 4 }, name: Name("x"), execution_scope: Module, source: Id { idx: 5 }, antecedent: Id { idx: 0 } }
                         antecedents: ['bb0]
                     }
 
                     'bb5: {
-                        data: Assign { expr: Id { idx: 6 }, name: Name("y"), execution_scope_id: Module, source: Id { idx: 7 }, antecedent: Id { idx: 4 } }
+                        data: Assign { expr: Id { idx: 6 }, name: Name("y"), execution_scope: Module, source: Id { idx: 7 }, antecedent: Id { idx: 4 } }
                         antecedents: ['bb4]
                     }
 
@@ -394,7 +387,24 @@ y = 4
             r#"
 nums = [x for x in range(10)]        
 "#,
-            expect![],
+            expect![[r#"
+                def main():
+                    'bb0: {
+                        data: Start
+                        antecedents: []
+                    }
+
+                    'bb1: {
+                        data: Assign { expr: Id { idx: 5 }, name: Name("x"), execution_scope: Comp(Id { idx: 6 }), source: Id { idx: 4 }, antecedent: Id { idx: 0 } }
+                        antecedents: ['bb0]
+                    }
+
+                    'bb2: {
+                        data: Assign { expr: Id { idx: 0 }, name: Name("nums"), execution_scope: Module, source: Id { idx: 6 }, antecedent: Id { idx: 1 } }
+                        antecedents: ['bb1]
+                    }
+
+            "#]],
         )
     }
 }

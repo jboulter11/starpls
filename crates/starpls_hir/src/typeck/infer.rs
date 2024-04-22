@@ -91,14 +91,19 @@ impl TyCtxt<'_> {
         let db = self.db;
         let curr_module = module(db, file);
         let ty = match &curr_module[expr] {
-            Expr::Name { name } => self.infer_name_expr(file, expr, name).unwrap_or_else(|| {
-                self.add_expr_diagnostic_error(
-                    file,
-                    expr,
-                    format!("\"{}\" is not defined", name.as_str()),
-                );
-                self.unbound_ty()
-            }),
+            Expr::Name { name } => {
+                let ty = self
+                    .infer_name_expr(file, expr, name)
+                    .unwrap_or_else(|| self.unbound_ty());
+                if ty.kind() == &TyKind::Unbound {
+                    self.add_expr_diagnostic_error(
+                        file,
+                        expr,
+                        format!("\"{}\" is not defined", name.as_str()),
+                    );
+                }
+                ty
+            }
             Expr::List { exprs } => {
                 // Determine the full type of the list. If all of the specified elements are of the same type T, then
                 // we assign the list the type `list[T]`. Otherwise, we assign it the type `list[Unknown]`.
