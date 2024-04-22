@@ -122,6 +122,16 @@ impl<'a> CodeFlowLowerCtx<'a> {
             Stmt::Expr { expr } => {
                 self.lower_expr(*expr);
             }
+            Stmt::For {
+                iterable,
+                targets,
+                stmts,
+            } => {
+                for target in targets.iter() {
+                    self.lower_assignment_target(*target, *iterable);
+                }
+                self.lower_stmts(stmts);
+            }
             _ => {}
         }
     }
@@ -406,5 +416,16 @@ nums = [x for x in range(10)]
 
             "#]],
         )
+    }
+
+    #[test]
+    fn test_for_stmt() {
+        check(
+            r#"
+for x, y in [[1, 2], [3, 4]]:
+    nums = [(x * y * i) for i in range(5)]
+"#,
+            expect![],
+        );
     }
 }
