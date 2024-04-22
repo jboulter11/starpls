@@ -1,7 +1,7 @@
 use crate::{
     def::{
-        scope::{module_scopes, ExecutionScopeId, Scopes},
-        Expr, Stmt, StmtId,
+        scope::{module_scopes, ExecutionScopeId, ScopeHirId, Scopes},
+        CompClause, Expr, Stmt, StmtId,
     },
     lower, Db, ExprId, Module, Name,
 };
@@ -9,8 +9,6 @@ use either::Either;
 use id_arena::{Arena, Id};
 use rustc_hash::FxHashMap;
 use starpls_common::File;
-
-use super::scope::ScopeHirId;
 
 #[allow(unused)]
 pub(crate) mod pretty;
@@ -23,7 +21,7 @@ pub(crate) enum FlowNode {
     Assign {
         expr: ExprId,
         name: Name,
-        execution_scope_id: ExecutionScopeId,
+        execution_scope: ExecutionScopeId,
         source: ExprId,
         antecedent: FlowNodeId,
     },
@@ -87,8 +85,11 @@ impl<'a> CodeFlowLowerCtx<'a> {
                     .hir_to_flow_node
                     .insert(stmt.into(), self.curr_node);
                 self.curr_node = saved_curr_node;
+                // self.with_new_start_node(|this| {
+                //     this.lower_stmts(stmts);
+                //     stmt
+                // });
             }
-
             Stmt::If {
                 test,
                 if_stmts,
@@ -134,8 +135,20 @@ impl<'a> CodeFlowLowerCtx<'a> {
 
     fn lower_expr(&mut self, expr: ExprId) {
         match &self.module[expr] {
-            Expr::Name { .. } => {
+            Expr::Name { name } => {
                 self.result.expr_to_node.insert(expr, self.curr_node);
+            }
+            Expr::DictComp {
+                entry,
+                comp_clauses,
+            } => {
+                self.lower_comp_clauses(comp_clauses);
+                self.lower_expr(entry.key);
+                self.lower_expr(entry.value);
+            }
+            Expr::ListComp { expr, comp_clauses } => {
+                self.lower_comp_clauses(comp_clauses);
+                self.lower_expr(*expr);
             }
             expr => expr.walk_child_exprs(|expr| {
                 self.lower_expr(expr);
@@ -144,12 +157,13 @@ impl<'a> CodeFlowLowerCtx<'a> {
     }
 
     fn lower_assignment_target(&mut self, expr: ExprId, source: ExprId) {
+        self.lower_expr(source);
         match &self.module[expr] {
             Expr::Name { ref name } => {
                 let assign_node = self.new_flow_node(FlowNode::Assign {
                     expr,
                     name: name.clone(),
-                    execution_scope_id: self.scopes.execution_scope_for_expr(expr).unwrap(),
+                    execution_scope: self.scopes.execution_scope_for_expr(expr).unwrap(),
                     source,
                     antecedent: self.curr_node,
                 });
@@ -170,6 +184,22 @@ impl<'a> CodeFlowLowerCtx<'a> {
         }
     }
 
+    fn lower_comp_clauses(&mut self, comp_clauses: &[CompClause]) {
+        for comp_clause in comp_clauses.into_iter() {
+            match comp_clause {
+                CompClause::For { iterable, targets } => {
+                    self.lower_expr(*iterable);
+                    for target in targets.iter() {
+                        self.lower_assignment_target(*target, *iterable);
+                    }
+                }
+                CompClause::If { test } => {
+                    self.lower_expr(*test);
+                }
+            }
+        }
+    }
+
     fn new_flow_node(&mut self, data: FlowNode) -> FlowNodeId {
         self.result.flow_nodes.alloc(data)
     }
@@ -185,6 +215,18 @@ impl<'a> CodeFlowLowerCtx<'a> {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn with_new_start_node<F, T>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut Self) -> T,
+        T: Into<ScopeHirId>,
+    {
+        let saved_curr_node = self.curr_node;
+        self.curr_node = self.new_flow_node(FlowNode::Start);
+        let hir = f(self).into();
+        self.result.hir_to_flow_node.insert(hir, self.curr_node);
+        self.curr_node = saved_curr_node;
     }
 }
 
@@ -344,5 +386,15 @@ y = 4
 
             "#]],
         );
+    }
+
+    #[test]
+    fn test_list_comp() {
+        check(
+            r#"
+nums = [x for x in range(10)]        
+"#,
+            expect![],
+        )
     }
 }

@@ -976,7 +976,6 @@ impl TyCtxt<'_> {
         let resolver = Resolver::new_for_expr_execution_scope(self.db, file, expr);
         let expr_scope = resolver.scope_for_expr(expr)?;
         let expr_execution_scope = resolver.execution_scope_for_expr(expr)?;
-
         let (execution_scope, effective_ty) = match resolver.resolve_name(name) {
             Some((execution_scope, defs)) => {
                 let mut var_defs = Vec::new();
@@ -1028,58 +1027,78 @@ impl TyCtxt<'_> {
             }
 
             None => {
-                let ty = match resolver.resolve_name_in_builtins(name)?.iter().next()? {
-                    ScopeDef::IntrinsicFunction(func) => {
-                        TyKind::IntrinsicFunction(*func, Substitution::new_identity(0)).intern()
-                    }
-                    ScopeDef::BuiltinFunction(func) => TyKind::BuiltinFunction(*func).intern(),
-                    ScopeDef::BuiltinVariable(type_ref) => resolve_type_ref(self.db, &type_ref).0,
-                    // This should be unreachable.
-                    _ => return None,
-                };
-                return Some(ty);
+                return Some(
+                    match resolver.resolve_name_in_builtins(name)?.iter().next()? {
+                        ScopeDef::IntrinsicFunction(func) => {
+                            TyKind::IntrinsicFunction(*func, Substitution::new_identity(0)).intern()
+                        }
+                        ScopeDef::BuiltinFunction(func) => TyKind::BuiltinFunction(*func).intern(),
+                        ScopeDef::BuiltinVariable(type_ref) => {
+                            resolve_type_ref(self.db, &type_ref).0
+                        }
+                        // This should be unreachable.
+                        _ => return None,
+                    },
+                );
             }
         };
 
-        let res = self.infer_expr_from_code_flow(file, expr, name, &self.unbound_ty());
-        res.or_else(|| {
-            if execution_scope != expr_execution_scope {
-                let cfg = code_flow_graph(self.db, file).cfg(self.db);
-                let hir_id = match execution_scope {
-                    ExecutionScopeId::Module => ScopeHirId::Module.into(),
-                    ExecutionScopeId::Def(stmt) => stmt.into(),
-                    ExecutionScopeId::Comp(expr) => expr.into(),
-                };
+        let mut start_ty = self.unbound_ty();
+        let mut fallback_ty = effective_ty;
+        if execution_scope != expr_execution_scope {
+            let cfg = code_flow_graph(self.db, file).cfg(self.db);
+            let hir_id = match execution_scope {
+                ExecutionScopeId::Module => ScopeHirId::Module.into(),
+                ExecutionScopeId::Def(stmt) => stmt.into(),
+                ExecutionScopeId::Comp(expr) => expr.into(),
+            };
 
-                let start_node = cfg.hir_to_flow_node.get(&hir_id)?;
-                self.infer_ref_from_flow_node(cfg, file, name, &self.unbound_ty(), *start_node)
-            } else {
-                Some(effective_ty)
+            let start_node = cfg.hir_to_flow_node.get(&hir_id)?;
+            if let Some(ty) = self.infer_ref_from_flow_node(
+                cfg,
+                file,
+                execution_scope,
+                name,
+                &self.unbound_ty(),
+                *start_node,
+            ) {
+                start_ty = ty.clone();
+                fallback_ty = ty;
             }
-        })
+        }
+
+        Some(
+            self.infer_expr_from_code_flow(file, expr, execution_scope, name, &start_ty)
+                .unwrap_or(fallback_ty),
+        )
     }
 
     fn infer_expr_from_code_flow(
         &mut self,
         file: File,
         expr: ExprId,
+        execution_scope: ExecutionScopeId,
         name: &Name,
         start_ty: &Ty,
     ) -> Option<Ty> {
         let cfg = code_flow_graph(self.db, file).cfg(self.db);
-        let start_node = cfg.expr_to_node.get(&expr)?;
-        self.infer_ref_from_flow_node(&cfg, file, name, start_ty, *start_node)
+        let res = cfg.expr_to_node.get(&expr);
+        let start_node = res?;
+        self.infer_ref_from_flow_node(&cfg, file, execution_scope, name, start_ty, *start_node)
     }
 
     fn infer_ref_from_flow_node(
         &mut self,
         cfg: &CodeFlowGraph,
         file: File,
+        execution_scope: ExecutionScopeId,
         name: &Name,
         start_ty: &Ty,
         start_node: FlowNodeId,
     ) -> Option<Ty> {
-        if let Some(res) = self.read_cached_ref_type_at_flow_node(name, start_node) {
+        if let Some(res) =
+            self.read_cached_ref_type_at_flow_node(file, execution_scope, name, start_node)
+        {
             return res;
         }
 
@@ -1093,52 +1112,73 @@ impl TyCtxt<'_> {
                     name: node_name,
                     source,
                     antecedent,
-                    ..
+                    execution_scope: assign_execution_scope,
                 } => {
-                    if name != node_name {
+                    if name != node_name || execution_scope != *assign_execution_scope {
                         curr_node_id = *antecedent;
                         continue;
                     }
 
                     self.infer_source_expr_assign(file, *source, None);
-                    let res = self
+                    break self
                         .cx
                         .type_of_expr
                         .get(&FileExprId::new(file, *expr))
                         .cloned();
-                    break res;
                 }
                 FlowNode::Branch { antecedents } => {
                     break Some(Ty::union(antecedents.iter().filter_map(|antecedent| {
-                        self.infer_ref_from_flow_node(cfg, file, name, start_ty, *antecedent)
+                        self.infer_ref_from_flow_node(
+                            cfg,
+                            file,
+                            execution_scope,
+                            name,
+                            start_ty,
+                            *antecedent,
+                        )
                     })))
                 }
             }
         };
 
-        self.cache_ref_type_at_flow_node(name, start_node, res)
+        self.cache_ref_type_at_flow_node(file, execution_scope, name, start_node, res)
     }
 
     fn read_cached_ref_type_at_flow_node(
         &self,
+        file: File,
+        execution_scope: ExecutionScopeId,
         name: &Name,
         flow_node: FlowNodeId,
     ) -> Option<Option<Ty>> {
         self.cx
             .flow_node_type_cache
-            .get(&CodeFlowCacheKey::new(name.clone(), flow_node))
+            .get(&CodeFlowCacheKey {
+                file,
+                execution_scope,
+                name: name.clone(),
+                flow_node,
+            })
             .cloned()
     }
 
     fn cache_ref_type_at_flow_node(
         &mut self,
+        file: File,
+        execution_scope: ExecutionScopeId,
         name: &Name,
         flow_node: FlowNodeId,
         res: Option<Ty>,
     ) -> Option<Ty> {
-        self.cx
-            .flow_node_type_cache
-            .insert(CodeFlowCacheKey::new(name.clone(), flow_node), res.clone());
+        self.cx.flow_node_type_cache.insert(
+            CodeFlowCacheKey {
+                file,
+                execution_scope,
+                name: name.clone(),
+                flow_node,
+            },
+            res.clone(),
+        );
         res
     }
 

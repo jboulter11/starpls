@@ -1,7 +1,7 @@
 use crate::{
     def::{
-        codeflow::FlowNodeId, ExprId, Function, LiteralString, LoadItemId, LoadStmt,
-        Param as HirDefParam, ParamId,
+        codeflow::FlowNodeId, scope::ExecutionScopeId, ExprId, Function, LiteralString, LoadItemId,
+        LoadStmt, Param as HirDefParam, ParamId,
     },
     module, source_map,
     typeck::{
@@ -1316,14 +1316,10 @@ impl GlobalCtxt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct CodeFlowCacheKey {
+    file: File,
+    execution_scope: ExecutionScopeId,
     name: Name,
     flow_node: FlowNodeId,
-}
-
-impl CodeFlowCacheKey {
-    pub(crate) fn new(name: Name, flow_node: FlowNodeId) -> Self {
-        Self { name, flow_node }
-    }
 }
 
 #[allow(unused)]

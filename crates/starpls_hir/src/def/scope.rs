@@ -19,6 +19,18 @@ pub(crate) enum ExecutionScopeId {
     Comp(ExprId),
 }
 
+impl From<StmtId> for ExecutionScopeId {
+    fn from(value: StmtId) -> Self {
+        Self::Def(value)
+    }
+}
+
+impl From<ExprId> for ExecutionScopeId {
+    fn from(value: ExprId) -> Self {
+        Self::Comp(value)
+    }
+}
+
 #[salsa::tracked]
 pub(crate) struct ModuleScopes {
     #[return_ref]
@@ -427,28 +439,28 @@ impl ScopeCollector<'_> {
                 Expr::DictComp {
                     entry,
                     comp_clauses,
-                } => {
-                    let prev_execution_scope = self.curr_execution_scope;
-                    self.curr_execution_scope = ExecutionScopeId::Comp(expr);
+                } => self.with_execution_scope(expr, |this| {
                     let mut comp = current;
-                    self.collect_comp_clauses(comp_clauses, &mut comp);
-                    self.collect_expr(entry.key, comp, None);
-                    self.collect_expr(entry.value, comp, None);
-                    self.record_expr_scope(expr, current);
-                    self.curr_execution_scope = prev_execution_scope;
-                }
+                    this.collect_comp_clauses(comp_clauses, &mut comp);
+                    this.collect_expr(entry.key, comp, None);
+                    this.collect_expr(entry.value, comp, None);
+                    this.record_expr_scope(expr, current);
+                    this.scopes
+                        .scopes_by_execution_scope_id
+                        .insert(this.curr_execution_scope, comp);
+                }),
                 Expr::ListComp {
                     expr: list_expr,
                     comp_clauses,
-                } => {
-                    let prev_execution_scope = self.curr_execution_scope;
-                    self.curr_execution_scope = ExecutionScopeId::Comp(expr);
+                } => self.with_execution_scope(expr, |this| {
                     let mut comp = current;
-                    self.collect_comp_clauses(comp_clauses, &mut comp);
-                    self.collect_expr(*list_expr, comp, None);
-                    self.record_expr_scope(expr, current);
-                    self.curr_execution_scope = prev_execution_scope;
-                }
+                    this.collect_comp_clauses(comp_clauses, &mut comp);
+                    this.collect_expr(*list_expr, comp, None);
+                    this.record_expr_scope(expr, current);
+                    this.scopes
+                        .scopes_by_execution_scope_id
+                        .insert(this.curr_execution_scope, comp);
+                }),
                 hir_expr => {
                     hir_expr.walk_child_exprs(|expr| self.collect_expr(expr, current, None));
                     self.record_expr_scope(expr, current);
@@ -489,6 +501,16 @@ impl ScopeCollector<'_> {
                 _ => {}
             }
         }
+    }
+
+    fn with_execution_scope<F>(&mut self, hir: impl Into<ExecutionScopeId>, mut f: F)
+    where
+        F: FnMut(&mut Self),
+    {
+        let prev_execution_scope = self.curr_execution_scope;
+        self.curr_execution_scope = hir.into();
+        f(self);
+        self.curr_execution_scope = prev_execution_scope;
     }
 
     fn alloc_scope(&mut self, parent: ScopeId) -> ScopeId {
