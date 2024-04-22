@@ -245,9 +245,7 @@ impl ScopeCollector<'_> {
                 data,
             });
         }
-        self.scopes
-            .scopes_by_execution_scope_id
-            .insert(self.curr_execution_scope, current);
+        self.finish_execution_scope(current);
         current
     }
 
@@ -445,9 +443,7 @@ impl ScopeCollector<'_> {
                     this.collect_expr(entry.key, comp, None);
                     this.collect_expr(entry.value, comp, None);
                     this.record_expr_scope(expr, current);
-                    this.scopes
-                        .scopes_by_execution_scope_id
-                        .insert(this.curr_execution_scope, comp);
+                    this.finish_execution_scope(comp);
                 }),
                 Expr::ListComp {
                     expr: list_expr,
@@ -457,9 +453,7 @@ impl ScopeCollector<'_> {
                     this.collect_comp_clauses(comp_clauses, &mut comp);
                     this.collect_expr(*list_expr, comp, None);
                     this.record_expr_scope(expr, current);
-                    this.scopes
-                        .scopes_by_execution_scope_id
-                        .insert(this.curr_execution_scope, comp);
+                    this.finish_execution_scope(comp);
                 }),
                 hir_expr => {
                     hir_expr.walk_child_exprs(|expr| self.collect_expr(expr, current, None));
@@ -471,6 +465,12 @@ impl ScopeCollector<'_> {
 
     fn record_expr_scope(&mut self, expr: ExprId, scope: ScopeId) {
         self.scopes.scopes_by_hir_id.insert(expr.into(), scope);
+    }
+
+    fn finish_execution_scope(&mut self, scope: ScopeId) {
+        self.scopes
+            .scopes_by_execution_scope_id
+            .insert(self.curr_execution_scope, scope);
     }
 
     fn collect_comp_clauses(&mut self, comp_clauses: &Box<[CompClause]>, current: &mut ScopeId) {
